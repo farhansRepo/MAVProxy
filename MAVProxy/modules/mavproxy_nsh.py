@@ -37,7 +37,7 @@ class NSHModule(mp_module.MPModule):
 
     def stop(self):
         '''stop nsh input'''
-        self.mpstate.rl.set_prompt(self.status.flightmode + "> ")
+        self.set_prompt(self.status.flightmode + "> ")
         self.mpstate.functions.input_handler = None
         self.started = False
         # unlock the port
@@ -86,8 +86,8 @@ class NSHModule(mp_module.MPModule):
                                     flags,
                                     0, self.serial_settings.baudrate,
                                     0, [0]*70)
-            
-            
+
+
     def cmd_nsh(self, args):
         '''nsh shell commands'''
         usage = "Usage: nsh <start|stop|set>"

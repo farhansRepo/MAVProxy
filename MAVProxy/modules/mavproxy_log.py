@@ -72,6 +72,8 @@ class LogModule(mp_module.MPModule):
             self.download_file = None
             self.download_filename = None
             self.download_set = set()
+            self.master.mav.log_request_end_send(self.target_system,
+                                                 self.target_component)
             if len(self.download_queue):
                 self.log_download_next()
 
@@ -157,13 +159,14 @@ class LogModule(mp_module.MPModule):
 
     def cmd_log(self, args):
         '''log commands'''
+        usage = "usage: log <list|download|erase|resume|status|cancel>"
         if len(args) < 1:
-            print("usage: log <list|download|erase|resume|status|cancel>")
+            print(usage)
             return
 
         if args[0] == "status":
             self.log_status()
-        if args[0] == "list":
+        elif args[0] == "list":
             print("Requesting log list")
             self.download_set = set()
             self.master.mav.log_request_list_send(self.target_system,
@@ -202,6 +205,8 @@ class LogModule(mp_module.MPModule):
             else:
                 filename = self.default_log_filename(log_num)
             self.log_download(log_num, filename)
+        else:
+            print(usage)
 
 
     def idle_task(self):

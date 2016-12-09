@@ -1,6 +1,22 @@
 from setuptools import setup
+import os
 
-version = "1.4.39"
+version = "1.5.7"
+
+def package_files(directory):
+    paths = []
+    for (path, directories, filenames) in os.walk(directory):
+        for filename in filenames:
+            paths.append(os.path.join('..', path, filename))
+    return paths
+
+package_data = ['modules/mavproxy_map/data/*.jpg', 
+                'modules/mavproxy_map/data/*.png',
+                'modules/mavproxy_mmap/mmap_app/*',
+                'tools/graphs/*.xml',
+]
+
+package_data.extend(package_files('MAVProxy/modules/mavproxy_cesium/app'))
 
 setup(name='MAVProxy',
       version=version,
@@ -15,9 +31,9 @@ control modules. MAVProxy is extensible via a modules system - see the modules
 subdirectory for some example modules. MAVProxy was developed by CanberraUAV
 for use in the 2012 Outback Challenge, and includes a module for the
 CanberraUAV search and rescue system. See
-http://Dronecode.github.io/MAVProxy/ for more information
+http://ardupilot.github.io/MAVProxy/ for more information
 on how to use MAVProxy.''',
-      url='https://github.com/Dronecode/MAVProxy',
+      url='https://github.com/ArduPilot/MAVProxy',
       author='Andrew Tridgell',
       author_email='andrew@tridgell.net',
       classifiers=[
@@ -32,8 +48,10 @@ on how to use MAVProxy.''',
       packages=['MAVProxy',
                 'MAVProxy.modules',
                 'MAVProxy.modules.mavproxy_map',
+                'MAVProxy.modules.mavproxy_mmap',
                 'MAVProxy.modules.mavproxy_misseditor',
                 'MAVProxy.modules.mavproxy_smartcamera',
+                'MAVProxy.modules.mavproxy_cesium',
                 'MAVProxy.modules.lib',
                 'MAVProxy.modules.lib.ANUGA',
                 'MAVProxy.modules.lib.optparse_gui'],
@@ -41,15 +59,13 @@ on how to use MAVProxy.''',
       # as that breaks the pip install. It seems that pip is not smart enough to
       # use the system versions of these dependencies, so it tries to download and install
       # large numbers of modules like numpy etc which may be already installed
-      install_requires=['pymavlink>=1.1.50',
-                        'pyserial'],
+      install_requires=['pymavlink>=1.1.73',
+                        'pyserial>=3.0'],
       scripts=['MAVProxy/mavproxy.py',
                'MAVProxy/tools/mavflightview.py',
                'MAVProxy/tools/MAVExplorer.py',
                'MAVProxy/modules/mavproxy_map/mp_slipmap.py',
                'MAVProxy/modules/mavproxy_map/mp_tile.py'],
       package_data={'MAVProxy':
-                    ['modules/mavproxy_map/data/*.jpg', 
-                     'modules/mavproxy_map/data/*.png',
-                     'tools/graphs/*.xml']}
+                    package_data}
     )

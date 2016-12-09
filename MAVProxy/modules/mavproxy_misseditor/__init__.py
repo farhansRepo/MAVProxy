@@ -39,7 +39,7 @@ class MissionEditorEventThread(threading.Thread):
                     #self.mp_misseditor.mpstate.module('rally').cmd_rally(['list'])
 
                     #means I'm doing a read & don't know how many wps to expect:
-                    self.mp_misseditor.num_wps_expected = -1 
+                    self.mp_misseditor.num_wps_expected = -1
                     self.wps_received = {}
 
                 elif event.get_type() == me_event.MEE_TIME_TO_QUIT:
@@ -70,9 +70,9 @@ class MissionEditorEventThread(threading.Thread):
                     loit_rad = event.get_arg("rad")
                     if (loit_rad is None):
                         continue
-                    
+
                     self.mp_misseditor.param_set('WP_LOITER_RAD', loit_rad)
-                    
+
                     #need to redraw rally points
                     # Don't understand why this rally refresh isn't lagging...
                     # likely same reason why "timeout setting WP_LOITER_RAD"
@@ -105,7 +105,7 @@ class MissionEditorEventThread(threading.Thread):
                         event.get_arg("p3"), event.get_arg("p4"),
                         event.get_arg("lat"), event.get_arg("lon"),
                         event.get_arg("alt"))
-                        
+
                     self.mp_misseditor.module('wp').wploader.add(w)
                     self.mp_misseditor.master.mav.send(
                             self.mp_misseditor.module('wp').wploader.wp(w.seq))
@@ -119,7 +119,7 @@ class MissionEditorEventThread(threading.Thread):
                     #don't let this loop run forever in case we have a lousy
                     #link to the plane
                     i = 0
-                    while (i < 10 and 
+                    while (i < 10 and
                             self.mp_misseditor.module('wp').loading_waypoints):
                         time.sleep(1)
                         i = i + 1
@@ -150,7 +150,7 @@ class MissionEditorModule(mp_module.MPModule):
     '''
     def __init__(self, mpstate):
         super(MissionEditorModule, self).__init__(mpstate, "misseditor", "mission editor", public = True)
-        
+
         self.num_wps_expected = 0 #helps me to know if all my waypoints I'm expecting have arrived
         self.wps_received = {}
 
@@ -163,17 +163,30 @@ class MissionEditorModule(mp_module.MPModule):
         self.event_thread = MissionEditorEventThread(self, self.event_queue, self.event_queue_lock)
         self.event_thread.start()
 
-        self.close_window = multiprocessing.Event()
-        self.close_window.clear()
+        self.close_window = multiprocessing.Semaphore()
+        self.close_window.acquire()
 
-        self.child = multiprocessing.Process(target=self.child_task,args=(self.event_queue,self.event_queue_lock,self.gui_event_queue,self.gui_event_queue_lock))
+        self.child = multiprocessing.Process(target=self.child_task,args=(self.event_queue,self.event_queue_lock,self.gui_event_queue,self.gui_event_queue_lock,self.close_window))
         self.child.start()
 
         self.mpstate.miss_editor = self
-        
+
+        self.last_unload_check_time = time.time()
+        self.unload_check_interval = 0.1 # seconds
+
+
     def unload(self):
         '''unload module'''
         self.mpstate.miss_editor.close()
+        self.mpstate.miss_editor = None
+
+    def idle_task(self):
+        now = time.time()
+        if self.last_unload_check_time + self.unload_check_interval < now:
+            self.last_unload_check_time = now
+            if not self.child.is_alive():
+                self.needs_unloading = True
+
 
     def mavlink_packet(self, m):
         '''handle an incoming mavlink packet'''
@@ -199,7 +212,7 @@ class MissionEditorModule(mp_module.MPModule):
                     self.gui_event_queue.put(MissionEditorEvent(
                         me_event.MEGE_ADD_MISS_TABLE_ROWS,num_rows=m.count-1))
             #write has been sent by the mission editor:
-            elif (self.num_wps_expected > 1): 
+            elif (self.num_wps_expected > 1):
                 if (m.count != self.num_wps_expected):
                     self.console.error("Unepxected waypoint count from APM after write (Editor)")
                 #since this is a write operation from the Editor there
@@ -220,14 +233,14 @@ class MissionEditorModule(mp_module.MPModule):
 
         self.gui_event_queue_lock.release()
 
-    def child_task(self, q, l, gq, gl):
+    def child_task(self, q, l, gq, gl, cw_sem):
         '''child process - this holds GUI elements'''
         mp_util.child_close_fds()
 
         from ..lib import wx_processguard
         from ..lib.wx_loader import wx
         from MAVProxy.modules.mavproxy_misseditor import missionEditorFrame
-        
+
         self.app = wx.App(False)
         self.app.frame = missionEditorFrame.MissionEditorFrame(parent=None,id=wx.ID_ANY)
 
@@ -235,13 +248,31 @@ class MissionEditorModule(mp_module.MPModule):
         self.app.frame.set_event_queue_lock(l)
         self.app.frame.set_gui_event_queue(gq)
         self.app.frame.set_gui_event_queue_lock(gl)
+        self.app.frame.set_close_window_semaphore(cw_sem)
 
+        self.app.SetExitOnFrameDelete(True)
         self.app.frame.Show()
+
+        # start a thread to monitor the "close window" semaphore:
+        class CloseWindowSemaphoreWatcher(threading.Thread):
+            def __init__(self, task, sem):
+                threading.Thread.__init__(self)
+                self.task = task
+                self.sem = sem
+            def run(self):
+                self.sem.acquire(True)
+                self.task.app.ExitMainLoop()
+        watcher_thread = CloseWindowSemaphoreWatcher(self, cw_sem)
+        watcher_thread.start()
+
         self.app.MainLoop()
+        # tell the watcher it is OK to quit:
+        cw_sem.release()
+        watcher_thread.join()
 
     def close(self):
         '''close the Mission Editor window'''
-        self.close_window.set()
+        self.close_window.release()
         if self.child.is_alive():
             self.child.join(1)
 

@@ -19,6 +19,7 @@ class ParamState:
         self.logdir = logdir
         self.vehicle_name = vehicle_name
         self.parm_file = parm_file
+        self.fetch_set = None
 
     def handle_mavlink_packet(self, master, m):
         '''handle an incoming mavlink packet'''
@@ -27,6 +28,8 @@ class ParamState:
             # Note: the xml specifies param_index is a uint16, so -1 in that field will show as 65535
             # We accept both -1 and 65535 as 'unknown index' to future proof us against someday having that
             # xml fixed.
+            if self.fetch_set is not None:
+                self.fetch_set.discard(m.param_index)
             if m.param_index != -1 and m.param_index != 65535 and m.param_index not in self.mav_param_set:
                 added_new_parameter = True
                 self.mav_param_set.add(m.param_index)
@@ -42,21 +45,27 @@ class ParamState:
                 print("Received %u parameters" % m.param_count)
                 if self.logdir != None:
                     self.mav_param.save(os.path.join(self.logdir, self.parm_file), '*', verbose=True)
+                    self.fetch_set = None
+            if self.fetch_set is not None and len(self.fetch_set) == 0:
+                self.fetch_check(master, force=True)
 
-    def fetch_check(self, master):
+    def fetch_check(self, master, force=False):
         '''check for missing parameters periodically'''
-        if self.param_period.trigger():
+        if self.param_period.trigger() or force:
             if master is None:
                 return
             if len(self.mav_param_set) == 0:
                 master.param_fetch_all()
             elif self.mav_param_count != 0 and len(self.mav_param_set) != self.mav_param_count:
-                if master.time_since('PARAM_VALUE') >= 1:
+                if master.time_since('PARAM_VALUE') >= 1 or force:
                     diff = set(range(self.mav_param_count)).difference(self.mav_param_set)
                     count = 0
                     while len(diff) > 0 and count < 10:
                         idx = diff.pop()
                         master.param_fetch_one(idx)
+                        if self.fetch_set is None:
+                            self.fetch_set = set()
+                        self.fetch_set.add(idx)
                         count += 1
 
     def param_help_download(self):
@@ -76,18 +85,15 @@ class ParamState:
         except Exception as e:
             print(e)
 
-    def param_help(self, args):
-        '''show help on a parameter'''
-        if len(args) == 0:
-            print("Usage: param help PARAMETER_NAME")
-            return
+    def param_help_tree(self):
+        '''return a "help tree", a map between a parameter and its metadata.  May return None if help is not available'''
         if self.vehicle_name is None:
             print("Unknown vehicle type")
-            return
+            return None
         path = mp_util.dot_mavproxy("%s.xml" % self.vehicle_name)
         if not os.path.exists(path):
             print("Please run 'param download' first (vehicle_name=%s)" % self.vehicle_name)
-            return
+            return None
         xml = open(path).read()
         from lxml import objectify
         objectify.enable_recursive_str()
@@ -100,6 +106,36 @@ class ParamState:
             for p in lib.param:
                 n = p.get('name')
                 htree[n] = p
+        return htree
+
+    def param_apropos(self, args):
+        '''search parameter help for a keyword, list those parameters'''
+        if len(args) == 0:
+            print("Usage: param apropos keyword")
+            return
+
+        htree = self.param_help_tree()
+        if htree is None:
+            return
+
+        contains = {}
+        for keyword in args:
+            for param in htree.keys():
+                if str(htree[param]).find(keyword) != -1:
+                    contains[param] = True
+        for param in contains.keys():
+            print("%s" % (param,))
+
+    def param_help(self, args):
+        '''show help on a parameter'''
+        if len(args) == 0:
+            print("Usage: param help PARAMETER_NAME")
+            return
+
+        htree = self.param_help_tree()
+        if htree is None:
+            return
+
         for h in args:
             if h in htree:
                 help = htree[h]
@@ -213,6 +249,8 @@ class ParamState:
             self.mav_param.load(args[1], param_wildcard, master, check=False)
         elif args[0] == "download":
             self.param_help_download()
+        elif args[0] == "apropos":
+            self.param_apropos(args[1:])
         elif args[0] == "help":
             self.param_help(args[1:])
         elif args[0] == "show":
@@ -221,6 +259,8 @@ class ParamState:
             else:
                 pattern = "*"
             self.mav_param.show(pattern)
+        elif args[0] == "status":
+            print("Have %u/%u params" % (len(self.mav_param_set), self.mav_param_count))
         else:
             print(usage)
 
@@ -230,8 +270,8 @@ class ParamModule(mp_module.MPModule):
         super(ParamModule, self).__init__(mpstate, "param", "parameter handling", public = True)
         self.pstate = ParamState(self.mav_param, self.logdir, self.vehicle_name, 'mav.parm')
         self.add_command('param', self.cmd_param, "parameter handling",
-                         ["<download>",
-                          "<set|show|fetch|help> (PARAMETER)",
+                         ["<download|status>",
+                          "<set|show|fetch|help|apropos> (PARAMETER)",
                           "<load|save|diff> (FILENAME)"])
         if self.continue_mode and self.logdir != None:
             parmfile = os.path.join(self.logdir, 'mav.parm')

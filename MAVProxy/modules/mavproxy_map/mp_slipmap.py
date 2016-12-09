@@ -19,7 +19,7 @@ except ImportError:
 from MAVProxy.modules.mavproxy_map import mp_elevation
 from MAVProxy.modules.mavproxy_map import mp_tile
 from MAVProxy.modules.lib import mp_util
-from mp_slipmap_util import *
+from MAVProxy.modules.mavproxy_map.mp_slipmap_util import *
 
 
 class MPSlipMap():
@@ -59,7 +59,7 @@ class MPSlipMap():
         self.drag_step = 10
 
         self.title = title
-        from ..lib.multiprocessing_queue import makeIPCQueue
+        from MAVProxy.modules.lib.multiprocessing_queue import makeIPCQueue
         self.event_queue = makeIPCQueue()
         self.object_queue = makeIPCQueue()
         self.close_window = multiprocessing.Semaphore()
@@ -73,10 +73,10 @@ class MPSlipMap():
         '''child process - this holds all the GUI elements'''
         mp_util.child_close_fds()
 
-        from ..lib import wx_processguard
-        from ..lib.wx_loader import wx
-        from mp_slipmap_ui import MPSlipMapFrame
-        
+        from MAVProxy.modules.lib import wx_processguard
+        from MAVProxy.modules.lib.wx_loader import wx
+        from MAVProxy.modules.mavproxy_map.mp_slipmap_ui import MPSlipMapFrame
+
         state = self
 
         self.mt = mp_tile.MPTile(download=self.download,
@@ -215,7 +215,7 @@ if __name__ == "__main__":
         (lat,lon) = flag.split(',')
         icon = sm.icon('flag.png')
         sm.add_object(SlipIcon('icon - %s' % str(flag), (float(lat),float(lon)), icon, layer=3, rotation=0, follow=False))
-            
+
     while sm.is_alive():
         while sm.event_count() > 0:
             obj = sm.get_event()

@@ -45,7 +45,7 @@ class MEState(object):
               MPSetting('condition', str, None, 'condition'),
               MPSetting('xaxis', str, None, 'xaxis'),
               MPSetting('linestyle', str, None, 'linestyle'),
-              MPSetting('flightmode', str, None, 'flightmode', choice=['apm','px4']),
+              MPSetting('show_flightmode', bool, True, 'show flightmode'),
               MPSetting('legend', str, 'upper left', 'legend position'),
               MPSetting('legend2', str, 'upper right', 'legend2 position')
               ]
@@ -92,7 +92,7 @@ def menu_callback(m):
         mestate.exit = True
         print "Exited. Press Enter to continue."
         sys.exit(0)
-        
+
     else:
         print('Unknown menu selection: %s' % m.returnkey)
 
@@ -130,10 +130,10 @@ def setup_file_menu():
                                             handler=MPMenuCallFileDialog(
                                                                         flags=('open',),
                                                                         title='Logfile Load',
-                                                                        wildcard='*.tlog')),
+                                                                        wildcard='*.tlog;*.log;*.BIN;*.bin')),
                                   MPMenuItem('&Quit\tCtrl+Q', 'Quit', 'quit')]))
     mestate.console.set_menu(TopMenu, menu_callback)
-    
+
 def setup_menus():
     '''setup console menus'''
     global TopMenu
@@ -155,7 +155,7 @@ def expression_ok(expression):
             if f.endswith(':2'):
                 f = f[:-2]
             if mavutil.evaluate_expression(f, mestate.status.msgs) is None:
-                expression_ok = False                        
+                expression_ok = False
         except Exception:
             expression_ok = False
             break
@@ -200,7 +200,7 @@ def load_graphs():
             for filename in filenames:
                 if filename.lower().endswith('.xml'):
                     gfiles.append(os.path.join(dirname, filename))
-                    
+
     for file in gfiles:
         if not os.path.exists(file):
             continue
@@ -218,28 +218,35 @@ def load_graphs():
             mestate.console.writeln("Loaded %s" % f)
     mestate.graphs = sorted(mestate.graphs, key=lambda g: g.name)
 
-def graph_process(fields, mavExpLog, mavExpFlightModeSel, mavExpSettings):
+def graph_process(mg, lenmavlist):
     '''process for a graph'''
-    mavExpLog.reduce_by_flightmodes(mavExpFlightModeSel)
-    
-    mg = grapher.MavGraph()
-    mg.set_marker(mavExpSettings.marker)
-    mg.set_condition(mavExpSettings.condition)
-    mg.set_xaxis(mavExpSettings.xaxis)
-    mg.set_linestyle(mavExpSettings.linestyle)
-    mg.set_flightmode(mavExpSettings.flightmode)
-    mg.set_legend(mavExpSettings.legend)
-    mg.add_mav(mavExpLog)
-    for f in fields:
-        mg.add_field(f)
-    mg.process()
-    mg.show()
+    mg.show(lenmavlist)
 
 def display_graph(graphdef):
     '''display a graph'''
     mestate.console.write("Expression: %s\n" % ' '.join(graphdef.expression.split()))
-    child = multiprocessing.Process(target=graph_process, args=[graphdef.expression.split(), mestate.mlog, mestate.flightmode_selections, mestate.settings])
+    #mestate.mlog.reduce_by_flightmodes(mestate.flightmode_selections)
+
+    #setup the graph, then pass to a new process and display
+    mg = grapher.MavGraph()
+    mg.set_marker(mestate.settings.marker)
+    mg.set_condition(mestate.settings.condition)
+    mg.set_xaxis(mestate.settings.xaxis)
+    mg.set_linestyle(mestate.settings.linestyle)
+    mg.set_show_flightmode(mestate.settings.show_flightmode)
+    mg.set_legend(mestate.settings.legend)
+    mg.add_mav(mestate.mlog)
+    for f in graphdef.expression.split():
+        mg.add_field(f)
+    mg.process(mestate.flightmode_selections, mestate.mlog._flightmodes)
+    lenmavlist = len(mg.mav_list)
+    #Important - mg.mav_list is the full logfile and can be very large in size
+    #To avoid slowdowns in Windows (which copies the vars to the new process)
+    #We need to empty this var when we're finished with it
+    mg.mav_list = []
+    child = multiprocessing.Process(target=graph_process, args=[mg, lenmavlist])
     child.start()
+    mestate.mlog.rewind()
 
 def cmd_graph(args):
     '''graph command'''
@@ -262,21 +269,25 @@ def cmd_graph(args):
         mestate.last_graph = GraphDefinition('Untitled', expression, '', [expression], None)
     display_graph(mestate.last_graph)
 
-def map_process(args, MAVExpLog, MAVExpFlightModes, MAVExpSettings):
-    '''process for a graph'''
-    from mavflightview import mavflightview_mav, mavflightview_options
-    MAVExpLog.reduce_by_flightmodes(MAVExpFlightModes)
-    
-    options = mavflightview_options()
-    options.condition = MAVExpSettings.condition
-    if len(args) > 0:
-        options.types = ','.join(args)
-    mavflightview_mav(MAVExpLog, options)
+def map_process(path, wp, fen, options):
+    '''process for displaying a graph'''
+    from mavflightview import mavflightview_show
+    mavflightview_show(path, wp, fen, options)
 
 def cmd_map(args):
     '''map command'''
-    child = multiprocessing.Process(target=map_process, args=[args, mestate.mlog, mestate.flightmode_selections, mestate.settings])
+    from mavflightview import mavflightview_mav, mavflightview_options
+    #mestate.mlog.reduce_by_flightmodes(mestate.flightmode_selections)
+    #setup and process the map
+    options = mavflightview_options()
+    options.condition = mestate.settings.condition
+    options._flightmodes = mestate.mlog._flightmodes
+    if len(args) > 0:
+        options.types = ','.join(args)
+    [path, wp, fen] = mavflightview_mav(mestate.mlog, options, mestate.flightmode_selections)
+    child = multiprocessing.Process(target=map_process, args=[path, wp, fen, options])
     child.start()
+    mestate.mlog.rewind()
 
 def cmd_set(args):
     '''control MAVExporer options'''
@@ -298,7 +309,7 @@ def cmd_reload(args):
     setup_menus()
     mestate.console.write("Loaded %u graphs\n" % len(mestate.graphs))
 
-def save_graph(graphdef):
+def save_graph(graphdef, mestate):
     '''save a graph as XML'''
     if graphdef.filename is None:
         if 'HOME' in os.environ:
@@ -316,7 +327,10 @@ def save_graph(graphdef):
     if graphdef.filename is None:
         mestate.console.writeln("No file to save graph to", fg='red')
         return
-    graphs = load_graph_xml(open(graphdef.filename).read(), graphdef.filename, load_all=True)
+    try:
+        graphs = load_graph_xml(open(graphdef.filename).read(), graphdef.filename, load_all=True)
+    except Exception:
+        graphs = []
     found_name = False
     for i in range(len(graphs)):
         if graphs[i].name == graphdef.name:
@@ -363,7 +377,7 @@ def save_process(MAVExpLastGraph):
                         save_callback)
     frame.ShowModal()
     frame.Destroy()
-    
+
 
 def cmd_save(args):
     '''save a graph'''
@@ -380,15 +394,15 @@ def cmd_param(args):
     for p in k:
         if fnmatch.fnmatch(str(p).upper(), wildcard.upper()):
             print("%-16.16s %f" % (str(p), mestate.mlog.params[p]))
-            
+
 def cmd_loadfile(args):
     '''callback from menu to load a log file'''
     if len(args) != 1:
         print "Error loading file"
         return
     loadfile(args[0])
-    
-def loadfile(args):    
+
+def loadfile(args):
     '''load a log file (path given by arg)'''
     mestate.console.write("Loading %s...\n" % args)
     t0 = time.time()
@@ -475,17 +489,17 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     mestate = MEState()
     setup_file_menu()
-    
+
     mestate.rl = rline.rline("MAV> ", mestate)
-    
+
     from argparse import ArgumentParser
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("files", metavar="<FILE>", nargs="?")
-    args = parser.parse_args() 
+    args = parser.parse_args()
 
     #If specified, open the log file
-    if args.files != None and len(args.files) != 0: 
-        loadfile(args.files)     
+    if args.files != None and len(args.files) != 0:
+        loadfile(args.files)
 
     # run main loop as a thread
     mestate.thread = threading.Thread(target=main_loop, name='main_loop')
@@ -493,9 +507,9 @@ if __name__ == "__main__":
     mestate.thread.start()
 
     # input loop
-    while mestate.rl != None and mestate.exit != True:        
+    while mestate.rl != None and mestate.exit != True:
         try:
-            try:           
+            try:
                 line = raw_input(mestate.rl.prompt)
             except EOFError:
                 mestate.exit = True
@@ -504,4 +518,4 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             mestate.exit = True
             break
-            
+

@@ -32,12 +32,13 @@ class MessageConsole(textconsole.SimpleConsole):
         '''child process - this holds all the GUI elements'''
         self.parent_pipe_send.close()
         self.parent_pipe_recv.close()
-        
+
         import wx_processguard
         from wx_loader import wx
         from wxconsole_ui import ConsoleFrame
         app = wx.App(False)
         app.frame = ConsoleFrame(state=self, title=self.title)
+        app.frame.SetDoubleBuffered(True)
         app.frame.Show()
         app.MainLoop()
 

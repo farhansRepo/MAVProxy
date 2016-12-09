@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 '''enable run-time addition and removal of master link, just like --master on the cnd line'''
-''' TO USE: 
+''' TO USE:
     link add 10.11.12.13:14550
     link list
     link remove 3      # to remove 3rd output
-'''    
+'''
 
 from pymavlink import mavutil
 import time, struct, math, sys, fnmatch, traceback
@@ -33,6 +33,7 @@ class LinkModule(mp_module.MPModule):
         self.no_fwd_types.add("BAD_DATA")
         self.add_completion_function('(SERIALPORT)', self.complete_serial_ports)
         self.add_completion_function('(LINKS)', self.complete_links)
+        self.last_altitude_announce = 0.0
 
         self.menu_added_console = False
         if mp_util.has_wxpython:
@@ -94,13 +95,28 @@ class LinkModule(mp_module.MPModule):
         for master in self.mpstate.mav_master:
             linkdelay = (self.status.highest_msec - master.highest_msec)*1.0e-3
             if master.linkerror:
-                print("link %u down" % (master.linknum+1))
+                status = "DOWN"
             else:
-                print("link %u OK (%u packets, %.2fs delay, %u lost, %.1f%% loss)" % (master.linknum+1,
-                                                                                      self.status.counters['MasterIn'][master.linknum],
-                                                                                      linkdelay,
-                                                                                      master.mav_loss,
-                                                                                      master.packet_loss()))
+                status = "OK"
+            sign_string = ''
+            try:
+                if master.mav.signing.sig_count:
+                    if master.mav.signing.secret_key is None:
+                        # unsigned/reject counts are not updated if we
+                        # don't have a signing secret
+                        sign_string = ", (no-signing-secret)"
+                    else:
+                        sign_string = ", unsigned %u reject %u" % (master.mav.signing.unsigned_count, master.mav.signing.reject_count)
+            except AttributeError as e:
+                # some mav objects may not have a "signing" attribute
+                pass
+            print("link %u %s (%u packets, %.2fs delay, %u lost, %.1f%% loss%s)" % (master.linknum+1,
+                                                                                    status,
+                                                                                    self.status.counters['MasterIn'][master.linknum],
+                                                                                    linkdelay,
+                                                                                    master.mav_loss,
+                                                                                    master.packet_loss(),
+                                                                                    sign_string))
     def cmd_link_list(self):
         '''list links'''
         print("%u links" % len(self.mpstate.mav_master))
@@ -220,6 +236,24 @@ class LinkModule(mp_module.MPModule):
         else:
             master.link_delayed = False
 
+    def colors_for_severity(self, severity):
+        severity_colors = {
+            # tuple is (fg, bg) (as in "white on red")
+            mavutil.mavlink.MAV_SEVERITY_EMERGENCY: ('white', 'red'),
+            mavutil.mavlink.MAV_SEVERITY_ALERT: ('white', 'red'),
+            mavutil.mavlink.MAV_SEVERITY_CRITICAL: ('white', 'red'),
+            mavutil.mavlink.MAV_SEVERITY_ERROR: ('black', 'orange'),
+            mavutil.mavlink.MAV_SEVERITY_WARNING: ('black', 'orange'),
+            mavutil.mavlink.MAV_SEVERITY_NOTICE: ('black', 'yellow'),
+            mavutil.mavlink.MAV_SEVERITY_INFO: ('white', 'green'),
+            mavutil.mavlink.MAV_SEVERITY_DEBUG: ('white', 'green'),
+        }
+        try:
+            return severity_colors[severity]
+        except Exception as e:
+            print("Exception: %s" % str(e))
+            return ('white', 'red')
+
     def report_altitude(self, altitude):
         '''possibly report a new altitude'''
         master = self.master
@@ -231,11 +265,12 @@ class LinkModule(mp_module.MPModule):
                 alt2 = self.mpstate.settings.basealt
                 altitude += alt2 - alt1
         self.status.altitude = altitude
+        altitude_converted = self.height_convert_units(altitude)
         if (int(self.mpstate.settings.altreadout) > 0 and
-            math.fabs(self.status.altitude - self.status.last_altitude_announce) >=
+            math.fabs(altitude_converted - self.last_altitude_announce) >=
             int(self.settings.altreadout)):
-            self.status.last_altitude_announce = self.status.altitude
-            rounded_alt = int(self.settings.altreadout) * ((self.settings.altreadout/2 + int(self.status.altitude)) / int(self.settings.altreadout))
+            self.last_altitude_announce = altitude_converted
+            rounded_alt = int(self.settings.altreadout) * ((self.settings.altreadout/2 + int(altitude_converted)) / int(self.settings.altreadout))
             self.say("height %u" % rounded_alt, priority='notification')
 
 
@@ -246,6 +281,8 @@ class LinkModule(mp_module.MPModule):
         sysid = m.get_srcSystem()
         if sysid in self.mpstate.sysid_outputs:
             self.mpstate.sysid_outputs[sysid].write(m.get_msgbuf())
+            if m.get_type() == "GLOBAL_POSITION_INT" and self.module('map') is not None:
+                self.module('map').set_secondary_vehicle_position(m)
             return
 
         if getattr(m, '_timestamp', None) is None:
@@ -288,7 +325,7 @@ class LinkModule(mp_module.MPModule):
             if mtype in delayedPackets:
                 return
 
-        if mtype == 'HEARTBEAT' and m.get_srcSystem() != 255:
+        if mtype == 'HEARTBEAT' and m.type != mavutil.mavlink.MAV_TYPE_GCS:
             if self.settings.target_system == 0 and self.settings.target_system != m.get_srcSystem():
                 self.settings.target_system = m.get_srcSystem()
                 self.say("online system %u" % self.settings.target_system,'message')
@@ -311,12 +348,15 @@ class LinkModule(mp_module.MPModule):
                 else:
                     self.say("DISARMED")
 
-            if master.flightmode != self.status.flightmode and time.time() > self.status.last_mode_announce + 2:
+            if master.flightmode != self.status.flightmode:
                 self.status.flightmode = master.flightmode
-                self.status.last_mode_announce = time.time()
                 if self.mpstate.functions.input_handler is None:
-                    self.mpstate.rl.set_prompt(self.status.flightmode + "> ")
-                self.say("Mode " + self.status.flightmode)
+                    self.set_prompt(self.status.flightmode + "> ")
+
+            if master.flightmode != self.status.last_mode_announced and time.time() > self.status.last_mode_announce + 2:
+                    self.status.last_mode_announce = time.time()
+                    self.status.last_mode_announced = master.flightmode
+                    self.say("Mode " + self.status.flightmode)
 
             if m.type == mavutil.mavlink.MAV_TYPE_FIXED_WING:
                 self.mpstate.vehicle_type = 'plane'
@@ -337,10 +377,11 @@ class LinkModule(mp_module.MPModule):
             elif m.type in [mavutil.mavlink.MAV_TYPE_ANTENNA_TRACKER]:
                 self.mpstate.vehicle_type = 'antenna'
                 self.mpstate.vehicle_name = 'AntennaTracker'
-        
+
         elif mtype == 'STATUSTEXT':
             if m.text != self.status.last_apm_msg or time.time() > self.status.last_apm_msg_time+2:
-                self.mpstate.console.writeln("APM: %s" % m.text, bg='red')
+                (fg, bg) = self.colors_for_severity(m.severity)
+                self.mpstate.console.writeln("APM: %s" % m.text, bg=bg, fg=fg)
                 self.status.last_apm_msg = m.text
                 self.status.last_apm_msg_time = time.time()
 
@@ -382,7 +423,7 @@ class LinkModule(mp_module.MPModule):
                 if rounded_dist != 0:
                     self.say("%u" % rounded_dist, priority="progress")
             self.status.last_distance_announce = rounded_dist
-    
+
         elif mtype == "GLOBAL_POSITION_INT":
             self.report_altitude(m.relative_alt*0.001)
 

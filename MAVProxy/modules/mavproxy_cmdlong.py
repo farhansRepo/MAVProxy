@@ -16,12 +16,14 @@ class CmdlongModule(mp_module.MPModule):
         self.add_command('position', self.cmd_position, "position")
         self.add_command('attitude', self.cmd_attitude, "attitude")
         self.add_command('cammsg', self.cmd_cammsg, "cammsg")
+        self.add_command('cammsg_old', self.cmd_cammsg_old, "cammsg_old")
         self.add_command('camctrlmsg', self.cmd_camctrlmsg, "camctrlmsg")
         self.add_command('posvel', self.cmd_posvel, "posvel")
         self.add_command('parachute', self.cmd_parachute, "parachute",
                          ['<enable|disable|release>'])
         self.add_command('long', self.cmd_long, "execute mavlink long command",
                          self.cmd_long_commands())
+        self.add_command('engine', self.cmd_engine, "engine")
 
     def cmd_long_commands(self):
         atts = dir(mavutil.mavlink)
@@ -37,7 +39,7 @@ class CmdlongModule(mp_module.MPModule):
         if ( len(args) != 1):
             print("Usage: takeoff ALTITUDE_IN_METERS")
             return
-        
+
         if (len(args) == 1):
             altitude = float(args[0])
             print("Take Off started")
@@ -80,7 +82,7 @@ class CmdlongModule(mp_module.MPModule):
 
     def cmd_camctrlmsg(self, args):
         '''camctrlmsg'''
-        
+
         print("Sent DIGICAM_CONFIGURE CMD_LONG")
         self.master.mav.command_long_send(
             self.settings.target_system,  # target_system
@@ -97,27 +99,71 @@ class CmdlongModule(mp_module.MPModule):
 
     def cmd_cammsg(self, args):
         '''cammsg'''
-  
+
+        params = [0, 0, 0, 0, 1, 0, 0]
+
+        # fill in any args passed by user
+        for i in range(min(len(args),len(params))):
+            params[i] = float(args[i])
+
         print("Sent DIGICAM_CONTROL CMD_LONG")
         self.master.mav.command_long_send(
             self.settings.target_system,  # target_system
             0, # target_component
             mavutil.mavlink.MAV_CMD_DO_DIGICAM_CONTROL, # command
             0, # confirmation
-            10, # param1
-            20, # param2
-            30, # param3
-            40, # param4
-            50, # param5
-            60, # param6
-            70) # param7
+            params[0], # param1
+            params[1], # param2
+            params[2], # param3
+            params[3], # param4
+            params[4], # param5
+            params[5], # param6
+            params[6]) # param7
+
+    def cmd_engine(self, args):
+        '''engine control'''
+        if len(args) < 1:
+            print("usage: engine <1|0>")
+            return
+        params = [0, 0, 0, 0, 0, 0, 0]
+
+        if args[0] == 'start':
+            args[0] = '1'
+        if args[0] == 'stop':
+            args[0] = '0'
+            
+        # fill in any args passed by user
+        for i in range(min(len(args),len(params))):
+            params[i] = float(args[i])
+
+        self.master.mav.command_long_send(
+            self.settings.target_system,  # target_system
+            0, # target_component
+            mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, # command
+            0, # confirmation
+            params[0], # param1
+            params[1], # param2
+            params[2], # param3
+            params[3], # param4
+            params[4], # param5
+            params[5], # param6
+            params[6]) # param7
+
+    def cmd_cammsg_old(self, args):
+        '''cammsg_old'''
+
+        print("Sent old DIGICAM_CONTROL")
+        self.master.mav.digicam_control_send(
+            self.settings.target_system,  # target_system
+            0, # target_component
+            0, 0, 0, 0, 1, 0, 0, 0)
 
     def cmd_do_change_speed(self, args):
         '''speed value'''
         if ( len(args) != 1):
             print("Usage: speed SPEED_VALUE")
             return
-        
+
         if (len(args) == 1):
             speed = float(args[0])
             print("SPEED %s" % (str(speed)))
@@ -139,7 +185,7 @@ class CmdlongModule(mp_module.MPModule):
         if ( len(args) != 3):
             print("Usage: yaw ANGLE ANGULAR_SPEED MODE:[0 absolute / 1 relative]")
             return
-        
+
         if (len(args) == 3):
             angle = float(args[0])
             angular_speed = float(args[1])
@@ -223,7 +269,7 @@ class CmdlongModule(mp_module.MPModule):
                                       63, # type mask (ignore all except attitude + thrust)
                                       att_target, # quaternion attitude
                                       0,  # body roll rate
-                                      0,  # body pich rate
+                                      0,  # body pitch rate
                                       0,  # body yaw rate
                                       thrust)  # thrust
 
@@ -240,7 +286,7 @@ class CmdlongModule(mp_module.MPModule):
             latlon = [0, 0]
         else:
             ignoremask = ignoremask & 504
-            print "found latlon", ignoremask            
+            print "found latlon", ignoremask
         vN = 0
         vE = 0
         vD = 0

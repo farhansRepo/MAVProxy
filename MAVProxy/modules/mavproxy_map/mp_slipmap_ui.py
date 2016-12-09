@@ -65,7 +65,7 @@ class MPSlipMapFrame(wx.Frame):
             if ret is not None:
                 ret.call_handler()
                 state.event_queue.put(SlipMenuEvent(state.popup_latlon, event, [], ret))
-            
+
         # otherwise a normal menu
         ret = self.menu.find_selected(event)
         if ret is None:
@@ -201,7 +201,7 @@ class MPSlipMapFrame(wx.Frame):
                     if obj.key in state.layers[layer]:
                         state.layers[layer][obj.key].set_hidden(obj.hide)
                 state.need_redraw = True
-        
+
         if obj is None:
             time.sleep(0.05)
 
@@ -333,7 +333,7 @@ class MPSlipMapPanel(wx.Panel):
             if state.elevation:
                 alt = self.ElevationMap.GetElevation(lat, lon)
                 if alt is not None:
-                    newtext += ' %.1fm' % alt
+                    newtext += ' %.1fm %uft' % (alt, alt*3.28084)
         state.mt.set_download(state.download)
         pending = 0
         if state.download:
@@ -353,7 +353,7 @@ class MPSlipMapPanel(wx.Panel):
                                             self.click_pos[0], self.click_pos[1])
             bearing = mp_util.gps_bearing(self.last_click_pos[0], self.last_click_pos[1],
                                             self.click_pos[0], self.click_pos[1])
-            newtext += '  Distance: %.1fm Bearing %.1f' % (distance, bearing)
+            newtext += '  Distance: %.1fm %.1fnm Bearing %.1f' % (distance, distance*0.000539957, bearing)
         if newtext != state.oldtext:
             self.position.Clear()
             self.position.WriteText(newtext)

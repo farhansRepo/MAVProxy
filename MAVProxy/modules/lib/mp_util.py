@@ -12,7 +12,7 @@ has_wxpython = False
 
 if platform.system() == 'Windows':
     # auto-detection is failing on windows, for an unknown reason
-    has_wxpython = True    
+    has_wxpython = True
 else:
     import imp
     try:
@@ -220,10 +220,12 @@ def PILTowx(pimg):
     wimg.SetData(pimg.convert('RGB').tostring())
     return wimg
 
-def dot_mavproxy(name):
+def dot_mavproxy(name=None):
     '''return a path to store mavproxy data'''
     dir = os.path.join(os.environ['HOME'], '.mavproxy')
     mkdir_p(dir)
+    if name is None:
+        return dir
     return os.path.join(dir, name)
 
 def download_url(url):
@@ -269,7 +271,7 @@ def child_fd_list_add(fd):
     '''add a file descriptor to list to be closed in child processes'''
     global child_fd_list
     child_fd_list.append(fd)
-    
+
 def child_fd_list_remove(fd):
     '''remove a file descriptor to list to be closed in child processes'''
     global child_fd_list

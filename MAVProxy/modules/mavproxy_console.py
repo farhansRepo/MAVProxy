@@ -38,6 +38,7 @@ class ConsoleModule(mp_module.MPModule):
         mpstate.console.set_status('RNG', 'RNG', fg='grey', row=0)
         mpstate.console.set_status('AHRS', 'AHRS', fg='grey', row=0)
         mpstate.console.set_status('EKF', 'EKF', fg='grey', row=0)
+        mpstate.console.set_status('LOG', 'LOG', fg='grey', row=0)
         mpstate.console.set_status('Heading', 'Hdg ---/---', row=2)
         mpstate.console.set_status('Alt', 'Alt ---', row=2)
         mpstate.console.set_status('AGL', 'AGL ---/---', row=2)
@@ -139,9 +140,13 @@ class ConsoleModule(mp_module.MPModule):
                 sats_string = "%u" % num_sats1
             else:
                 sats_string = "%u/%u" % (num_sats1, num_sats2)
-            if ((msg.fix_type == 3 and master.mavlink10()) or
+            if ((msg.fix_type >= 3 and master.mavlink10()) or
                 (msg.fix_type == 2 and not master.mavlink10())):
-                self.console.set_status('GPS', 'GPS: OK (%s)' % sats_string, fg='green')
+                if (msg.fix_type >= 4):
+                    fix_type = "%u" % msg.fix_type
+                else:
+                    fix_type = ""
+                self.console.set_status('GPS', 'GPS: OK%s (%s)' % (fix_type, sats_string), fg='green')
             else:
                 self.console.set_status('GPS', 'GPS: %u (%s)' % (msg.fix_type, sats_string), fg='red')
             if master.mavlink10():
@@ -154,13 +159,13 @@ class ConsoleModule(mp_module.MPModule):
                 alt = master.field('GPS_RAW_INT', 'alt', 0) / 1.0e3
             else:
                 alt = master.field('GPS_RAW', 'alt', 0)
-            if self.module('wp').wploader.count() > 0:
-                wp = self.module('wp').wploader.wp(0)
-                home_lat = wp.x
-                home_lng = wp.y
+            home = self.module('wp').get_home()
+            if home is not None:
+                home_lat = home.x
+                home_lng = home.y
             else:
-                home_lat = master.field('HOME', 'lat') * 1.0e-7
-                home_lng = master.field('HOME', 'lon') * 1.0e-7
+                home_lat = None
+                home_lng = None
             lat = master.field('GLOBAL_POSITION_INT', 'lat', 0) * 1.0e-7
             lng = master.field('GLOBAL_POSITION_INT', 'lon', 0) * 1.0e-7
             rel_alt = master.field('GLOBAL_POSITION_INT', 'relative_alt', 0) * 1.0e-3
@@ -185,11 +190,11 @@ class ConsoleModule(mp_module.MPModule):
                 if vehicle_agl is None:
                     vehicle_agl = '---'
                 else:
-                    vehicle_agl = int(vehicle_agl)
-                self.console.set_status('AGL', 'AGL %u/%s' % (agl_alt, vehicle_agl))
-            self.console.set_status('Alt', 'Alt %u' % rel_alt)
-            self.console.set_status('AirSpeed', 'AirSpeed %u' % msg.airspeed)
-            self.console.set_status('GPSSpeed', 'GPSSpeed %u' % msg.groundspeed)
+                    vehicle_agl = self.height_string(vehicle_agl)
+                self.console.set_status('AGL', 'AGL %s/%s' % (self.height_string(agl_alt), vehicle_agl))
+            self.console.set_status('Alt', 'Alt %s' % self.height_string(rel_alt))
+            self.console.set_status('AirSpeed', 'AirSpeed %s' % self.speed_string(msg.airspeed))
+            self.console.set_status('GPSSpeed', 'GPSSpeed %s' % self.speed_string(msg.groundspeed))
             self.console.set_status('Thr', 'Thr %u' % msg.throttle)
             t = time.localtime(msg._timestamp)
             flying = False
@@ -217,13 +222,18 @@ class ConsoleModule(mp_module.MPModule):
                         'AHRS' : mavutil.mavlink.MAV_SYS_STATUS_AHRS,
                         'RC'   : mavutil.mavlink.MAV_SYS_STATUS_SENSOR_RC_RECEIVER,
                         'TERR' : mavutil.mavlink.MAV_SYS_STATUS_TERRAIN,
-                        'RNG'  : mavutil.mavlink.MAV_SYS_STATUS_SENSOR_LASER_POSITION}
+                        'RNG'  : mavutil.mavlink.MAV_SYS_STATUS_SENSOR_LASER_POSITION,
+                        'LOG'  : mavutil.mavlink.MAV_SYS_STATUS_LOGGING,
+            }
             announce = [ 'RC' ]
             for s in sensors.keys():
                 bits = sensors[s]
-                present = ((msg.onboard_control_sensors_enabled & bits) == bits)
+                present = ((msg.onboard_control_sensors_present & bits) == bits)
+                enabled = ((msg.onboard_control_sensors_enabled & bits) == bits)
                 healthy = ((msg.onboard_control_sensors_health & bits) == bits)
                 if not present:
+                    fg = 'black'
+                elif not enabled:
                     fg = 'grey'
                 elif not healthy:
                     fg = 'red'
@@ -235,10 +245,10 @@ class ConsoleModule(mp_module.MPModule):
                 self.console.set_status(s, s, fg=fg)
             for s in announce:
                 bits = sensors[s]
-                present = ((msg.onboard_control_sensors_enabled & bits) == bits)
+                enabled = ((msg.onboard_control_sensors_enabled & bits) == bits)
                 healthy = ((msg.onboard_control_sensors_health & bits) == bits)
                 was_healthy = ((self.last_sys_status_health & bits) == bits)
-                if present and not healthy and was_healthy:
+                if enabled and not healthy and was_healthy:
                     self.say("%s fail" % s)
             self.last_sys_status_health = msg.onboard_control_sensors_health
 
@@ -294,12 +304,20 @@ class ConsoleModule(mp_module.MPModule):
                 fg = 'black'
             self.console.set_status('Radio', 'Radio %u/%u %u/%u' % (msg.rssi, msg.noise, msg.remrssi, msg.remnoise), fg=fg)
         elif type == 'HEARTBEAT':
-            self.console.set_status('Mode', '%s' % master.flightmode, fg='blue')
+            fmode = master.flightmode
+            if self.settings.vehicle_name:
+                fmode = self.settings.vehicle_name + ':' + fmode
+            self.console.set_status('Mode', '%s' % fmode, fg='blue')
             if self.master.motors_armed():
                 arm_colour = 'green'
             else:
                 arm_colour = 'red'
-            self.console.set_status('ARM', 'ARM', fg=arm_colour)
+            armstring = 'ARM'
+            # add safety switch state
+            if 'SYS_STATUS' in self.mpstate.status.msgs:
+                if (self.mpstate.status.msgs['SYS_STATUS'].onboard_control_sensors_enabled & mavutil.mavlink.MAV_SYS_STATUS_SENSOR_MOTOR_OUTPUTS) == 0:
+                    armstring += '(SAFE)'
+            self.console.set_status('ARM', armstring, fg=arm_colour)
             if self.max_link_num != len(self.mpstate.mav_master):
                 for i in range(self.max_link_num):
                     self.console.set_status('Link%u'%(i+1), '', row=1)
@@ -307,19 +325,46 @@ class ConsoleModule(mp_module.MPModule):
             for m in self.mpstate.mav_master:
                 linkdelay = (self.mpstate.status.highest_msec - m.highest_msec)*1.0e-3
                 linkline = "Link %u " % (m.linknum+1)
+                fg = 'dark green'
                 if m.linkerror:
                     linkline += "down"
                     fg = 'red'
                 else:
                     packets_rcvd_percentage = 100
-                    if (m.mav_loss != 0): #avoid divide-by-zero
-                        packets_rcvd_percentage = (1.0 - (float(m.mav_loss) / float(m.mav_count))) * 100.0
+                    if (m.mav_count+m.mav_loss) != 0: #avoid divide-by-zero
+                        packets_rcvd_percentage = (100.0 * m.mav_count) / (m.mav_count + m.mav_loss)
 
-                    linkline += "OK (%u pkts, %.2fs delay, %u lost) %u%%" % (m.mav_count, linkdelay, m.mav_loss, packets_rcvd_percentage)
-                    if linkdelay > 1:
+                    linkbits = ["%u pkts" % m.mav_count,
+                                "%u lost" % m.mav_loss,
+                                "%.2fs delay" % linkdelay,
+                    ]
+                    try:
+                        if m.mav.signing.sig_count:
+                            # other end is sending us signed packets
+                            if not m.mav.signing.secret_key:
+                                # we've received signed packets but
+                                # can't verify them
+                                fg = 'orange'
+                                linkbits.append("!KEY")
+                            elif not m.mav.signing.sign_outgoing:
+                                # we've received signed packets but aren't
+                                # signing outselves; this can lead to hairloss
+                                fg = 'orange'
+                                linkbits.append("!SIGNING")
+                            if m.mav.signing.badsig_count:
+                                fg = 'orange'
+                                linkbits.append("%u badsigs" % m.mav.signing.badsig_count)
+                    except AttributeError as e:
+                        # mav.signing.sig_count probably doesn't exist
+                        pass
+
+                    linkline += "OK {rcv_pct:.1f}% ({bits})".format(
+                        rcv_pct=packets_rcvd_percentage,
+                        bits=", ".join(linkbits))
+
+                    if linkdelay > 1 and fg == 'dark green':
                         fg = 'orange'
-                    else:
-                        fg = 'dark green'
+
                 self.console.set_status('Link%u'%m.linknum, linkline, row=1, fg=fg)
         elif type in ['WAYPOINT_CURRENT', 'MISSION_CURRENT']:
             wpmax = self.module('wp').wploader.count()
@@ -341,7 +386,7 @@ class ConsoleModule(mp_module.MPModule):
                 self.console.set_status('ETR', 'ETR %u:%02u' % (time_remaining/60, time_remaining%60))
 
         elif type == 'NAV_CONTROLLER_OUTPUT':
-            self.console.set_status('WPDist', 'Distance %u' % msg.wp_dist)
+            self.console.set_status('WPDist', 'Distance %s' % self.dist_string(msg.wp_dist))
             self.console.set_status('WPBearing', 'Bearing %u' % msg.target_bearing)
             if msg.alt_error > 0:
                 alt_error_sign = "L"

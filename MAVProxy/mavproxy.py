@@ -13,6 +13,7 @@ import serial, Queue, select
 import traceback
 import select
 import shlex
+import platform
 
 from MAVProxy.modules.lib import textconsole
 from MAVProxy.modules.lib import rline
@@ -45,11 +46,11 @@ class MPStatus(object):
         self.setup_mode = opts.setup
         self.mav_error = 0
         self.altitude = 0
-        self.last_altitude_announce = 0.0
         self.last_distance_announce = 0.0
         self.exit = False
         self.flightmode = 'MAV'
         self.last_mode_announce = 0
+        self.last_mode_announced = 'MAV'
         self.logdir = None
         self.last_heartbeat = 0
         self.last_message = 0
@@ -122,8 +123,8 @@ class MPState(object):
         from MAVProxy.modules.lib.mp_settings import MPSettings, MPSetting
         self.settings = MPSettings(
             [ MPSetting('link', int, 1, 'Primary Link', tab='Link', range=(0,4), increment=1),
-              MPSetting('streamrate', int, 4, 'Stream rate link1', range=(-1,20), increment=1),
-              MPSetting('streamrate2', int, 4, 'Stream rate link2', range=(-1,20), increment=1),
+              MPSetting('streamrate', int, 4, 'Stream rate link1', range=(-1,100), increment=1),
+              MPSetting('streamrate2', int, 4, 'Stream rate link2', range=(-1,100), increment=1),
               MPSetting('heartbeat', int, 1, 'Heartbeat rate', range=(0,5), increment=1),
               MPSetting('mavfwd', bool, True, 'Allow forwarded control'),
               MPSetting('mavfwd_rate', bool, False, 'Allow forwarded rate control'),
@@ -153,7 +154,14 @@ class MPState(object):
               MPSetting('source_component', int, 0, 'MAVLink Source component', range=(0,255), increment=1),
               MPSetting('target_system', int, 0, 'MAVLink target system', range=(0,255), increment=1),
               MPSetting('target_component', int, 0, 'MAVLink target component', range=(0,255), increment=1),
-              MPSetting('state_basedir', str, None, 'base directory for logs and aircraft directories')
+              MPSetting('state_basedir', str, None, 'base directory for logs and aircraft directories'),
+              MPSetting('allow_unsigned', bool, True, 'whether unsigned packets will be accepted'),
+
+              MPSetting('dist_unit', str, 'm', 'distance unit', choice=['m', 'nm', 'miles'], tab='Units'),
+              MPSetting('height_unit', str, 'm', 'height unit', choice=['m', 'feet']),
+              MPSetting('speed_unit', str, 'm/s', 'height unit', choice=['m/s', 'knots', 'mph']),
+
+              MPSetting('vehicle_name', str, '', 'Vehicle Name', tab='Vehicle'),
             ])
 
         self.completions = {
@@ -192,7 +200,7 @@ class MPState(object):
         if name in self.public_modules:
             return self.public_modules[name]
         return None
-    
+
     def master(self):
         '''return the currently chosen mavlink master object'''
         if len(self.mav_master) == 0:
@@ -328,7 +336,7 @@ def cmd_module(args):
                 reload(pmodule)
             except ImportError:
                 clear_zipimport_cache()
-                reload(pmodule)                
+                reload(pmodule)
             if load_module(modname, quiet=True):
                 print("Reloaded module %s" % modname)
     elif args[0] == "unload":
@@ -378,7 +386,7 @@ def clear_zipimport_cache():
     import sys, zipimport
     syspath_backup = list(sys.path)
     zipimport._zip_directory_cache.clear()
- 
+
     # load back items onto sys.path
     sys.path = syspath_backup
     # add this too: see https://mail.python.org/pipermail/python-list/2005-May/353229.html
@@ -396,7 +404,7 @@ def import_package(name):
     except ImportError:
         clear_zipimport_cache()
         mod = __import__(name)
-        
+
     components = name.split('.')
     for comp in components[1:]:
         mod = getattr(mod, comp)
@@ -414,6 +422,14 @@ command_map = {
     'alias'   : (cmd_alias,    'command aliases')
     }
 
+def shlex_quotes(value):
+    '''see http://stackoverflow.com/questions/6868382/python-shlex-split-ignore-single-quotes'''
+    lex = shlex.shlex(value)
+    lex.quotes = '"'
+    lex.whitespace_split = True
+    lex.commenters = ''
+    return list(lex)
+
 def process_stdin(line):
     '''handle commands from user'''
     if line is None:
@@ -423,7 +439,7 @@ def process_stdin(line):
     if mpstate.functions.input_handler is not None:
           mpstate.functions.input_handler(line)
           return
-    
+
     line = line.strip()
 
     if mpstate.status.setup_mode:
@@ -443,13 +459,13 @@ def process_stdin(line):
     if not line:
         return
 
-    args = shlex.split(line)
+    args = shlex_quotes(line)
     cmd = args[0]
     while cmd in mpstate.aliases:
         line = mpstate.aliases[cmd]
         args = shlex.split(line) + args[1:]
         cmd = args[0]
-        
+
     if cmd == 'help':
         k = command_map.keys()
         k.sort()
@@ -578,11 +594,12 @@ def log_writer():
 def log_paths():
     '''Returns tuple (logdir, telemetry_log_filepath, raw_telemetry_log_filepath)'''
     if opts.aircraft is not None:
+        dirname = ""
         if opts.mission is not None:
             print(opts.mission)
-            dirname = "%s/logs/%s/Mission%s" % (opts.aircraft, time.strftime("%Y-%m-%d"), opts.mission)
+            dirname += "%s/logs/%s/Mission%s" % (opts.aircraft, time.strftime("%Y-%m-%d"), opts.mission)
         else:
-            dirname = "%s/logs/%s" % (opts.aircraft, time.strftime("%Y-%m-%d"))
+            dirname += "%s/logs/%s" % (opts.aircraft, time.strftime("%Y-%m-%d"))
         # dirname is currently relative.  Possibly add state_basedir:
         if mpstate.settings.state_basedir is not None:
             dirname = os.path.join(mpstate.settings.state_basedir,dirname)
@@ -605,6 +622,7 @@ def log_paths():
         dir_path = os.path.dirname(opts.logfile)
         if not os.path.isabs(dir_path) and mpstate.settings.state_basedir is not None:
             dir_path = os.path.join(mpstate.settings.state_basedir,dir_path)
+
         logdir = dir_path
 
     mkdir_p(logdir)
@@ -619,17 +637,33 @@ def open_telemetry_logs(logpath_telem, logpath_telem_raw):
         mode = 'a'
     else:
         mode = 'w'
-    mpstate.logfile = open(logpath_telem, mode=mode)
-    mpstate.logfile_raw = open(logpath_telem_raw, mode=mode)
-    print("Log Directory: %s" % mpstate.status.logdir)
-    print("Telemetry log: %s" % logpath_telem)
 
-    # use a separate thread for writing to the logfile to prevent
-    # delays during disk writes (important as delays can be long if camera
-    # app is running)
-    t = threading.Thread(target=log_writer, name='log_writer')
-    t.daemon = True
-    t.start()
+    try:
+        mpstate.logfile = open(logpath_telem, mode=mode)
+        mpstate.logfile_raw = open(logpath_telem_raw, mode=mode)
+        print("Log Directory: %s" % mpstate.status.logdir)
+        print("Telemetry log: %s" % logpath_telem)
+
+        #make sure there's enough free disk space for the logfile (>200Mb)
+        #statvfs doesn't work in Windows
+        if platform.system() != 'Windows':
+            stat = os.statvfs(logpath_telem)
+            if stat.f_bfree*stat.f_bsize < 209715200:
+                print("ERROR: Not enough free disk space for logfile")
+                mpstate.status.exit = True
+                return
+
+        # use a separate thread for writing to the logfile to prevent
+        # delays during disk writes (important as delays can be long if camera
+        # app is running)
+        t = threading.Thread(target=log_writer, name='log_writer')
+        t.daemon = True
+        t.start()
+    except Exception as e:
+        print("ERROR: opening log file for writing: %s" % e)
+        mpstate.status.exit = True
+        return
+
 
 def set_stream_rates():
     '''set mavlink stream rates'''
@@ -725,7 +759,7 @@ def main_loop():
             mpstate.input_count += 1
             cmds = line.split(';')
             if len(cmds) == 1 and cmds[0] == "":
-                  mpstate.empty_input_count += 1                 
+                  mpstate.empty_input_count += 1
             for c in cmds:
                 process_stdin(c)
 
@@ -863,7 +897,7 @@ if __name__ == '__main__':
                       action='store_true', default=False)
     parser.add_option("--show-errors", dest="show_errors", help="show MAVLink error packets",
                       action='store_true', default=False)
-    parser.add_option("--speech", dest="speech", help="use text to speach",
+    parser.add_option("--speech", dest="speech", help="use text to speech",
                       action='store_true', default=False)
     parser.add_option("--aircraft", dest="aircraft", help="aircraft name", default=None)
     parser.add_option("--cmd", dest="cmd", help="initial commands", default=None, action='append')
@@ -875,6 +909,8 @@ if __name__ == '__main__':
         default=[],
         help='Load the specified module. Can be used multiple times, or with a comma separated list')
     parser.add_option("--mav09", action='store_true', default=False, help="Use MAVLink protocol 0.9")
+    parser.add_option("--mav10", action='store_true', default=False, help="Use MAVLink protocol 1.0")
+    parser.add_option("--mav20", action='store_true', default=True, help="Use MAVLink protocol 2.0")
     parser.add_option("--auto-protocol", action='store_true', default=False, help="Auto detect MAVLink protocol version")
     parser.add_option("--nowait", action='store_true', default=False, help="don't wait for HEARTBEAT on startup")
     parser.add_option("-c", "--continue", dest='continue_mode', action='store_true', default=False, help="continue logs")
@@ -886,7 +922,7 @@ if __name__ == '__main__':
     parser.add_option("--profile", action='store_true', help="run the Yappi python profiler")
     parser.add_option("--state-basedir", default=None, help="base directory for logs and aircraft directories")
     parser.add_option("--version", action='store_true', help="version information")
-    parser.add_option("--default-modules", default="log,wp,rally,fence,param,relay,tuneopt,arm,mode,calibration,rc,auxopt,misc,cmdlong,battery,terrain,output", help='default module list')
+    parser.add_option("--default-modules", default="log,signing,wp,rally,fence,param,relay,tuneopt,arm,mode,calibration,rc,auxopt,misc,cmdlong,battery,terrain,output,adsb", help='default module list')
 
     (opts, args) = parser.parse_args()
 
@@ -896,6 +932,8 @@ if __name__ == '__main__':
 
     if opts.mav09:
         os.environ['MAVLINK09'] = '1'
+    if opts.mav20 and not opts.mav10:
+        os.environ['MAVLINK20'] = '1'
     from pymavlink import mavutil, mavparm
     mavutil.set_dialect(opts.dialect)
 
@@ -906,7 +944,7 @@ if __name__ == '__main__':
         print "MAVProxy is a modular ground station using the mavlink protocol"
         print "MAVProxy Version: " + version
         sys.exit(1)
-    
+
     # global mavproxy state
     mpstate = MPState()
     mpstate.status.exit = False
@@ -1088,5 +1126,5 @@ if __name__ == '__main__':
         if hasattr(m, 'unload'):
             print("Unloading module %s" % m.name)
             m.unload()
-        
+
     sys.exit(1)

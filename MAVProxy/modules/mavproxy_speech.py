@@ -13,11 +13,16 @@ class SpeechModule(mp_module.MPModule):
             self.settings.set('speech', 1)
         except AttributeError:
             self.settings.append(('speech', int, 1))
+        try:
+            self.settings.set('speech_voice', '')
+        except AttributeError:
+            self.settings.append(('speech_voice', str, ''))
         self.kill_speech_dispatcher()
-        for backend in [self.say_speechd, self.say_espeak, self.say_speech]:
+        for (backend_name,backend) in [("speechd",self.say_speechd), ("espeak",self.say_espeak), ("speech", self.say_speech)]:
             try:
                 backend("")
                 self.say_backend = backend
+                print("Using speech backend '%s'" % backend_name)
                 return
             except Exception:
                 pass
@@ -64,6 +69,8 @@ class SpeechModule(mp_module.MPModule):
     def say_espeak(self, text, priority='important'):
         '''speak some text using espeak'''
         from espeak import espeak
+        if self.settings.speech_voice:
+            espeak.set_voice(self.settings.speech_voice)
         espeak.synth(text)
 
     def say_speech(self, text, priority='important'):
@@ -77,6 +84,14 @@ class SpeechModule(mp_module.MPModule):
         self.console.writeln(text)
         if self.settings.speech and self.say_backend is not None:
             self.say_backend(text, priority=priority)
+
+    def mavlink_packet(self, msg):
+        '''handle an incoming mavlink packet'''
+        type = msg.get_type()
+        if type == "STATUSTEXT":
+            # say some statustext values
+            if msg.text.startswith("Tuning: "):
+                self.say(msg.text[8:])
 
 def init(mpstate):
     '''initialise module'''
